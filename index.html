@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Global Messenger</title>
+    <script src="https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        :root { --bg: #121212; --panel: #1e1e1e; --primary: #5865F2; --red: #da373c; --green: #23a559; }
+        * { box-sizing: border-box; font-family: 'Segoe UI', sans-serif; outline: none; }
+        body { background: var(--bg); color: white; margin: 0; height: 100vh; display: flex; overflow: hidden; }
+
+        /* ЛОГИН */
+        #login { position: fixed; inset: 0; background: var(--bg); z-index: 99; display: flex; align-items: center; justify-content: center; flex-direction: column; }
+        .card { background: var(--panel); padding: 30px; border-radius: 12px; width: 320px; text-align: center; box-shadow: 0 4px 20px rgba(0,0,0,0.5); }
+        input, select { width: 100%; padding: 12px; background: #2b2b2b; border: 1px solid #444; color: white; border-radius: 6px; margin: 10px 0; }
+        button { width: 100%; padding: 12px; background: var(--primary); color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; font-size: 16px; }
+        
+        /* ОСНОВНОЕ ОКНО */
+        #app { display: none; width: 100%; height: 100%; flex-direction: column; }
+        
+        /* Сетка видео (адаптивная) */
+        #video-grid { flex: 1; background: black; display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 10px; padding: 10px; overflow: auto; }
+        .vid-wrap { position: relative; width: 45%; max-width: 600px; aspect-ratio: 16/9; background: #222; border-radius: 8px; overflow: hidden; border: 1px solid #444; }
+        .vid-wrap video { width: 100%; height: 100%; object-fit: cover; }
+        /* Если видео выключено - показываем фон */
+        .vid-wrap video.hidden { opacity: 0; }
+        .vid-placeholder { position: absolute; inset:0; display: flex; align-items: center; justify-content: center; font-size: 40px; color: #555; z-index: 0; }
+        .name { position: absolute; bottom: 10px; left: 10px; background: rgba(0,0,0,0.6); padding: 4px 8px; border-radius: 4px; font-size: 12px; z-index: 2; }
+
+        /* Панель управления */
+        .controls { padding: 15px; background: var(--panel); display: flex; justify-content: center; gap: 20px; }
+        .btn-circle { width: 50px; height: 50px; border-radius: 50%; border: none; font-size: 20px; cursor: pointer; color: white; display: flex; align-items: center; justify-content: center; transition: 0.2s; }
+        .btn-on { background: var(--panel); border: 2px solid #555; } 
+        .btn-off { background: var(--red); border: 2px solid var(--red); }
+        .btn-active { background: white; color: black; }
+
+        /* Чат поверх видео (мобильный стиль) */
+        #chat-overlay { position: absolute; bottom: 90px; left: 20px; width: 300px; max-height: 200px; overflow-y: auto; display: flex; flex-direction: column; gap: 5px; pointer-events: none; }
+        .msg { background: rgba(0,0,0,0.6); padding: 8px 12px; border-radius: 15px; font-size: 13px; color: white; align-self: flex-start; pointer-events: auto; backdrop-filter: blur(4px); }
+        
+        /* Инпут сообщения */
+        .chat-input { position: absolute; bottom: 90px; right: 20px; display: flex; gap: 5px; }
+        .chat-input input { margin: 0; width: 200px; background: rgba(0,0,0,0.7); border: 1px solid #555; }
+
+        @media (max-width: 600px) {
+            .vid-wrap { width: 100%; height: auto; }
+            #chat-overlay { width: 80%; left: 10px; bottom: 140px; }
+            .chat-input { bottom: 140px; right: 10px; width: auto; }
+            .controls { padding-bottom: 30px; }
+        }
+    </style>
+</head>
+<body>
+
+    <div id="login">
+        <div class="card">
+            <h2>🌐 Global Connect</h2>
+            <input type="text" id="nick" placeholder="Твой никнейм">
+            <select id="mics"></select>
+            <button onclick="start()">ВОЙТИ</button>
+            <div id="status" style="margin-top:10px; font-size:12px; color:#888;"></div>
+        </div>
+    </div>
+
+    <div id="app">
+        <div id="video-grid"></div>
+        
+        <div id="chat-overlay"></div>
+        
+        <div class="chat-input" id="inputZone" style="display:none;">
+            <input type="text" id="msgText" placeholder="Сообщение..." onkeypress="if(event.key==='Enter') sendMsg()">
+            <button style="width:50px; padding:0;" onclick="sendMsg()">➤</button>
+        </div>
+
+        <div class="controls">
+            <button class="btn-circle btn-on" id="micBtn" onclick="toggleMic()"><i class="fas fa-microphone"></i></button>
+            <button class="btn-circle btn-off" id="camBtn" onclick="toggleCam()"><i class="fas fa-video-slash"></i></button>
+            <button class="btn-circle btn-on" style="background:var(--primary); border:none;" onclick="copyLink()"><i class="fas fa-user-plus"></i></button>
+            <button class="btn-circle btn-off" style="background:#333; border:none;" onclick="toggleChatInput()"><i class="fas fa-comment"></i></button>
+        </div>
+    </div>
+
+    <script>
+        let peer;
+        let myStream;
+        let myNick;
+        const peers = {};
+        
+        // Статус камеры при запуске (false = выкл)
+        let camEnabled = false; 
+        let micEnabled = true;
+
+        // --- 1. НАСТРОЙКА УСТРОЙСТВ ---
+        async function initDevices() {
+            try {
+                await navigator.mediaDevices.getUserMedia({audio:true});
+                const devs = await navigator.mediaDevices.enumerateDevices();
+                const sel = document.getElementById('mics');
+                devs.filter(d=>d.kind==='audioinput').forEach(d=>{
+                    sel.innerHTML += `<option value="${d.deviceId}">${d.label || 'Mic'}</option>`;
+                });
+            } catch(e) { console.log(e); }
+        }
+        initDevices();
+
+        // --- 2. СТАРТ (С УЛУЧШЕННЫМ STUN) ---
+        async function start() {
+            myNick = document.getElementById('nick').value || 'User';
+            const micId = document.getElementById('mics').value;
+            
+            document.getElementById('status').innerText = "Подключение к камере...";
+
+            try {
+                // Запрашиваем видео и звук, но...
+                myStream = await navigator.mediaDevices.getUserMedia({
+                    video: { width: 640, height: 480 },
+                    audio: { deviceId: micId ? {exact:micId} : undefined, echoCancellation:true, noiseSuppression:true }
+                });
+
+                // ...СРАЗУ ВЫКЛЮЧАЕМ ВИДЕО (программно)
+                myStream.getVideoTracks()[0].enabled = false; 
+                camEnabled = false;
+
+                document.getElementById('login').style.display = 'none';
+                document.getElementById('app').style.display = 'flex';
+                
+                addVideo(myStream, true, myNick); // Добавляем себя
+                initPeer();
+
+            } catch(e) {
+                alert("Ошибка: " + e.message + "\nПопробуйте закрыть Discord или другие вкладки.");
+                document.getElementById('status').innerText = "Ошибка доступа.";
+            }
+        }
+
+        // --- 3. PEERJS (С ГЛОБАЛЬНЫМИ СЕРВЕРАМИ) ---
+        function initPeer() {
+            peer = new Peer(null, {
+                debug: 2,
+                config: {
+                    // ЭТО САМОЕ ВАЖНОЕ ДЛЯ СВЯЗИ МЕЖДУ СТРАНАМИ
+                    iceServers: [
+                        { urls: 'stun:stun.l.google.com:19302' },
+                        { urls: 'stun:stun1.l.google.com:19302' },
+                        { urls: 'stun:global.stun.twilio.com:3478' }
+                    ]
+                }
+            });
+
+            peer.on('open', id => {
+                console.log('My ID:', id);
+                // Проверка авто-входа по ссылке
+                const urlParams = new URLSearchParams(window.location.search);
+                const target = urlParams.get('call');
+                if(target && target !== id) connectTo(target);
+            });
+
+            peer.on('call', call => {
+                call.answer(myStream);
+                handleCall(call);
+            });
+            
+            peer.on('connection', conn => handleConn(conn));
+        }
+
+        function connectTo(id) {
+            const call = peer.call(id, myStream);
+            const conn = peer.connect(id);
+            handleCall(call);
+            handleConn(conn);
+        }
+
+        function handleCall(call) {
+            if(peers[call.peer]) return;
+            peers[call.peer] = call;
+
+            call.on('stream', remoteStream => {
+                // Если видео еще нет - создаем
+                if(!document.getElementById(`vid-${call.peer}`)) {
+                    addVideo(remoteStream, false, "Собеседник", call.peer);
+                }
+            });
+            call.on('close', () => removeVideo(call.peer));
+        }
+
+        let activeConn;
+        function handleConn(conn) {
+            activeConn = conn;
+            conn.on('open', () => showMsg("Система", "Соединение установлено!"));
+            conn.on('data', data => {
+                if(data.type === 'chat') showMsg(data.nick, data.text);
+            });
+        }
+
+        // --- 4. ИНТЕРФЕЙС ---
+        function addVideo(stream, isMine, name, id="local") {
+            const div = document.createElement('div');
+            div.className = 'vid-wrap';
+            div.id = `vid-${id}`;
+            div.innerHTML = `
+                <div class="vid-placeholder"><i class="fas fa-user"></i></div>
+                <video autoplay playsinline ${isMine ? 'muted' : ''} style="${isMine ? 'transform:scaleX(-1)' : ''}"></video>
+                <div class="name">${name}</div>
+            `;
+            const vid = div.querySelector('video');
+            vid.srcObject = stream;
+            
+            // Следим за состоянием видео (включено/выключено)
+            setInterval(() => {
+                const track = stream.getVideoTracks()[0];
+                if(track && track.enabled && !track.muted) {
+                    vid.classList.remove('hidden');
+                } else {
+                    vid.classList.add('hidden');
+                }
+            }, 500);
+
+            document.getElementById('video-grid').appendChild(div);
+        }
+
+        function removeVideo(id) {
+            const el = document.getElementById(`vid-${id}`);
+            if(el) el.remove();
+        }
+
+        // --- 5. КНОПКИ ---
+        function toggleMic() {
+            micEnabled = !micEnabled;
+            myStream.getAudioTracks()[0].enabled = micEnabled;
+            const btn = document.getElementById('micBtn');
+            btn.className = micEnabled ? 'btn-circle btn-on' : 'btn-circle btn-off';
+            btn.innerHTML = micEnabled ? '<i class="fas fa-microphone"></i>' : '<i class="fas fa-microphone-slash"></i>';
+        }
+
+        function toggleCam() {
+            camEnabled = !camEnabled;
+            myStream.getVideoTracks()[0].enabled = camEnabled;
+            const btn = document.getElementById('camBtn');
+            btn.className = camEnabled ? 'btn-circle btn-on' : 'btn-circle btn-off';
+            btn.innerHTML = camEnabled ? '<i class="fas fa-video"></i>' : '<i class="fas fa-video-slash"></i>';
+        }
+
+        function copyLink() {
+            const link = `${window.location.origin}${window.location.pathname}?call=${peer.id}`;
+            navigator.clipboard.writeText(link);
+            alert("Ссылка скопирована! Скинь другу.");
+        }
+
+        // Чат
+        function toggleChatInput() {
+            const z = document.getElementById('inputZone');
+            z.style.display = z.style.display === 'flex' ? 'none' : 'flex';
+        }
+
+        function sendMsg() {
+            const txt = document.getElementById('msgText').value;
+            if(!txt) return;
+            if(activeConn) activeConn.send({type:'chat', nick:myNick, text:txt});
+            showMsg("Я", txt);
+            document.getElementById('msgText').value = '';
+        }
+
+        function showMsg(nick, text) {
+            const div = document.createElement('div');
+            div.className = 'msg';
+            div.innerHTML = `<b>${nick}:</b> ${text}`;
+            const over = document.getElementById('chat-overlay');
+            over.appendChild(div);
+            over.scrollTop = over.scrollHeight;
+            setTimeout(() => div.remove(), 10000); // Удалять через 10 сек
+        }
+    </script>
+</body>
+</html>
